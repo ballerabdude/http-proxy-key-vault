@@ -1,4 +1,4 @@
-const { DefaultAzureCredential, WorkloadIdentityCredential, AzureCliCredential } = require('@azure/identity');
+const { DefaultAzureCredential } = require('@azure/identity');
 const { SecretClient } = require('@azure/keyvault-secrets');
 const express = require('express');
 const axios = require('axios');
@@ -32,32 +32,42 @@ if (debugMode) {
     });
 }
 
-const fetchHeadersFromSecrets = async () => {
-    const credential = new DefaultAzureCredential();
-    const secretClient = new SecretClient(keyVaultUrl, credential);
-    
-    const secrets = await secretClient.listPropertiesOfSecrets();
-    const headers = {};
+// Initialize Azure credentials and secret client
+const credential = new DefaultAzureCredential();
+const secretClient = new SecretClient(keyVaultUrl, credential);
 
+// Initialize custom headers and HTTPS Agent
+let customHeaders = {};
+const httpsAgent = new (require('https').Agent)({
+    rejectUnauthorized: false
+});
+
+// Function to fetch and cache headers from secrets
+const fetchHeadersFromSecrets = async () => {
+    const secrets = await secretClient.listPropertiesOfSecrets();
+    
     for await (const secret of secrets) {
         if (secret.name.startsWith(secretPrefix)) {
             const headerValue = (await secretClient.getSecret(secret.name)).value;
             const headerName = secret.name.replace(secretPrefix, '').replace(/-/g, '-');
-            headers[headerName] = headerValue;
+            customHeaders[headerName] = headerValue;
 
             if (debugMode) {
                 console.log(`Fetched header ${headerName} with value ${headerValue} from secret ${secret.name}`);
             }
         }
     }
-
-    return headers;
 };
 
+// Fetch and cache headers during initialization
+fetchHeadersFromSecrets().catch(err => {
+    console.error('Failed to fetch secrets:', err);
+    process.exit(1);
+});
+
+// Proxy handler
 app.all('*', async (req, res) => {
     try {
-        const customHeaders = await fetchHeadersFromSecrets();
-
         const response = await axios({
             method: req.method,
             url: targetUrl + req.url,
@@ -66,9 +76,7 @@ app.all('*', async (req, res) => {
                 ...customHeaders
             },
             data: req.body,
-            httpsAgent: new (require('https').Agent)({
-                rejectUnauthorized: false
-            })
+            httpsAgent
         });
 
         if (debugMode) {
@@ -80,7 +88,6 @@ app.all('*', async (req, res) => {
 
         res.status(response.status).send(response.data);
     } catch (error) {
-        // console.log(error)
         if (error.response) {
             if (debugMode) {
                 console.error('Error response from target:', JSON.stringify(error.response.data));
